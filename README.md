@@ -1,1 +1,1 @@
-# weather-pi-anemometer
+# WeatherPi Anemometer
