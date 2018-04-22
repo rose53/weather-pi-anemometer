@@ -5,7 +5,7 @@
 
 ## Wind Vane
 
-| Direction (Degrees) |     | Resistance (Ohms) | Voltage (V=3.3v, R=300k) |
+| Direction (Degrees) | Dir. | Resistance (Ohms) | Voltage (V=3.3v, R=300k) |
 | +++++++             | ++  | ++++++++          | +++++++++++++++++        |   
 |0                    | N   | 33k               |     0.33v                |                   
 |22.5                 | NNE | 6.57k             |     0.07v                |
