@@ -1,19 +1,16 @@
 #include <PubSubClient.h>
 #include <WiFiClient.h>
-#include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
+#include <ArduinoJson.h>
+#include "credentials.h"
 
-const char* ssid         = "xxx";
-const char* password     = "xxx";
-const char* mqttServer   = "192.168.0.115";
-const char* mqttUser     = "weatherpi";
-const char* mqttPassword = "xxx";
+const char* place             = "ANEMOMETER";
+const char* sensordata        = "sensordata";
+const char* typeWindspeed     = "WINDSPEED";
+const char* typeWinddirection = "WINDDIRECTION";
 
-const char* place         = "ANEMOMETER";
-const char* sensordata    = "sensordata";
-const char* typeWindspeed = "WINDSPEED";
-
-const char* topic = "sensordata/anemometer/windspeed";
+const char* windspeedTopic     = "sensordata/anemometer/windspeed";
+const char* winddirectionTopic = "sensordata/anemometer/winddirection";
 
 const unsigned int deepSleepTimeNoConnection = 15 * 60000000; //
 
@@ -21,13 +18,19 @@ const byte             anemometerPin = 4;
 const unsigned long    measureInterval = 5000;
 volatile unsigned long pulses = 0;
 
-const unsigned long    maxNoChangeTime = 10 * 60 * 1000;
-unsigned long          previousMillis  = 0;     
+const unsigned long    maxNoChangeTime = 5 * 60 * 1000;
+unsigned long          previousMillis  = 0;
+
+struct DirectionVoltEntry {
+  float volt;
+  float deg;
+};
 
 struct {
   uint32_t crc32;
   float last;
   float act;
+  float direction;
   bool  send;
   bool  enableRF;
 } rtcData;
@@ -36,6 +39,26 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 
 char json[256];
+
+
+DirectionVoltEntry directionVoltMap[] = {
+    {0.008,112.5},
+    {0.01,67.0},
+    {0.011,90.0},
+    {0.015,157.5},
+    {0.024,135.0},
+    {0.034,202.5},
+    {0.042,180.0},
+    {0.07,22.5},
+    {0.088,45.0},
+    {0.15,247.5},
+    {0.17,225.0},
+    {0.223,337.5},
+    {0.33,0.0},
+    {0.41,292.5},
+    {0.59,315.0},
+    {1.0,270.0}    // 0.94
+};
 
 uint32_t calculateCRC32(const uint8_t *data, size_t length)
 {
@@ -101,21 +124,40 @@ boolean wifiConnect(void) {
 void sendWindspeed(float windspeed) {
 
   StaticJsonBuffer<200> jsonBuffer;
-    
+
   JsonObject& obj = jsonBuffer.createObject();
 
   obj.set("place", place);
-    
+
   obj.set("sensor", "ELTAKO_WS");
   obj.set("type", typeWindspeed);
   obj.set("windspeed", windspeed, 2);
 
   obj.printTo(json, sizeof(json));
-  client.publish(topic, json);
+  client.publish(windspeedTopic, json);
 
 
   delay(250);
 }
+
+void sendWinddirection(float winddirection) {
+
+  StaticJsonBuffer<200> jsonBuffer;
+
+  JsonObject& obj = jsonBuffer.createObject();
+
+  obj.set("place", place);
+
+  obj.set("sensor", "WIND_VANE");
+  obj.set("type", typeWinddirection);
+  obj.set("winddirection", winddirection, 2);
+
+  obj.printTo(json, sizeof(json));
+  client.publish(winddirectionTopic, json);
+}
+
+
+
 
 void pulseCallback() {
   pulses++;
@@ -130,9 +172,9 @@ float getWindSpeed() {
   unsigned long start = micros();
 
   while (millis() - current < measureInterval) {
-    yield();    
+    yield();
   }
- 
+
   unsigned long diff = micros() - start;
   detachInterrupt(digitalPinToInterrupt(anemometerPin));
 
@@ -142,16 +184,50 @@ float getWindSpeed() {
   return (pulses / (diff / (1000.0f * 1000.0f) + 2 )) / 3.0f;
 }
 
+float getWindDirection() {
+    float retVal = -1;
+    float delta;
 
-void updateWindSpeedRtcData() {
+    float voltage = map(analogRead(A0), 0, 1023, 0, 1000);
+    delay(50);
+    yield();
+    voltage += map(analogRead(A0), 0, 1023, 0, 1000);
+    delay(50);
+    yield();
+    voltage += map(analogRead(A0), 0, 1023, 0, 1000);
+    delay(50);
+    yield();
+    voltage += map(analogRead(A0), 0, 1023, 0, 1000);
+
+    voltage = voltage / 4000;
+    
+    for (int i = 0; i < 16; i++) {
+        if (i == 15) {
+            delta = 0.2;
+        } else {
+            delta = (directionVoltMap[i + 1].volt - directionVoltMap[i].volt) / 2.0;
+        }        
+        if (voltage <= (directionVoltMap[i].volt + delta))  {
+            retVal = directionVoltMap[i].deg;
+            break;
+        }
+    }
+    return retVal;
+}
+
+void updateWindRtcData() {
   float act = getWindSpeed();
-
+  if (act > 0.0) {
+    rtcData.direction = getWindDirection();
+  } else {
+    rtcData.direction = -1.0;
+  }
   if (abs(rtcData.act - act) >= 0.1) {
     rtcData.last     = rtcData.act;
     rtcData.act      = act;
-    rtcData.send     = true;      
+    rtcData.send     = true;
   } else {
-    rtcData.send     = false;      
+    rtcData.send     = false;
   }
   rtcData.crc32    = calculateCRC32(((uint8_t*) &rtcData) + 4, sizeof(rtcData) - 4);
   ESP.rtcUserMemoryWrite(0, (uint32_t*) &rtcData, sizeof(rtcData));
@@ -178,20 +254,21 @@ void setup() {
     uint32_t crcOfData = calculateCRC32(((uint8_t*) &rtcData) + 4, sizeof(rtcData) - 4);
     if (crcOfData != rtcData.crc32) {
       // crc error, we init new, maybe first startup
-      rtcData.last     = 0.0;
-      rtcData.act      = 0.0;
-      rtcData.send     = false;
-      rtcData.enableRF = true;
-      rtcData.crc32 = calculateCRC32(((uint8_t*) &rtcData) + 4, sizeof(rtcData) - 4);
+      rtcData.last      = 0.0;
+      rtcData.act       = 0.0;
+      rtcData.direction = -1.0;
+      rtcData.send      = false;
+      rtcData.enableRF  = true;
+      rtcData.crc32     = calculateCRC32(((uint8_t*) &rtcData) + 4, sizeof(rtcData) - 4);
     }
   }
-  yield(); 
+  yield();
   // check, if we need to send the data
   if (!rtcData.send) {
     // get new windspeed, if it differs from the last, set send to true and fall asleep
-    updateWindSpeedRtcData();
+    updateWindRtcData();
   }
-  yield(); 
+  yield();
   if (!rtcData.send) {
     // go to sleep with WLAN disabled for 10 sec
     deepSleepRFDisabled();
@@ -200,7 +277,7 @@ void setup() {
     // we want to send data, but we first have to enable RF
     enableRF();
   }
-  yield(); 
+  yield();
   // RF enabled, changed data, ready to send
 
   // Connect to WiFi network
@@ -211,20 +288,26 @@ void setup() {
   }
   // send windspeed, we just waked up, so first send the old value
   sendWindspeed(rtcData.last);
+  if (rtcData.last > 0.0 && rtcData.direction >= 0.0) {
+    sendWinddirection(rtcData.direction);  
+  }
 }
 
 void loop() {
-    
+
     unsigned long currentMillis = millis();
     if (currentMillis - previousMillis >= maxNoChangeTime) {
-        // no change since maxNoChangeTime 
+        // no change since maxNoChangeTime
         deepSleepRFDisabled();
     }
 
     if (rtcData.send && mqttConnect()) {
-      sendWindspeed(rtcData.act);      
+      sendWindspeed(rtcData.act);
+      if (rtcData.act > 0.0 && rtcData.direction >= 0.0) {
+         sendWinddirection(rtcData.direction);  
+      }
       previousMillis = currentMillis;
-    } 
-    updateWindSpeedRtcData();
+    }
+    updateWindRtcData();
     yield();
 }
